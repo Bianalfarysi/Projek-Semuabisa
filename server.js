@@ -1,0 +1,728 @@
+const express = require("express");
+const fs = require("fs");
+const mysql = require("mysql2");
+const cors = require("cors");
+const bodyParser = require("body-parser");
+const path = require("path");
+const session = require("express-session");
+const bcrypt = require("bcrypt");
+const app = express();
+
+app.use(express.static(__dirname));
+
+app.use(
+  cors({
+    origin: "http://localhost:3010",
+    credentials: true,
+  })
+);
+app.use(express.json());
+app.use(
+  bodyParser.urlencoded({
+    extended: true,
+  })
+);
+
+app.use(
+  session({
+    secret: "secret123",
+    resave: false,
+    saveUninitialized: true,
+  })
+);
+
+const conn = require("./koneksi");
+
+//======INI BUAT TEMPLATE NOTIFIKASI ERROR======
+function renderNotification(res, { title, header, message, button, redirect }) {
+  fs.readFile("notification.html", "utf-8", (err, html) => {
+    if (err) return res.status(500).send("Error loading notification");
+
+    html = html
+      .replace("<!--TITLE-->", title)
+      .replace("<!--HEADER-->", header)
+      .replace("<!--MESSAGE-->", message)
+      .replace("<!--BUTTON-->", button)
+      .replace("<!--REDIRECT-->", redirect);
+
+    res.send(html);
+  });
+}
+
+// ==========================================================
+// HOME(INDEX)
+// ==========================================================
+app.get("/", (req, res) => {
+  fs.readFile("index.html", "utf-8", (err, data) => {
+    if (err) return res.status(500).send("Internal Server Error");
+    res.send(data);
+  });
+});
+
+// ==========================================================
+// LOGIN
+// ==========================================================
+app.post("/login", (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return renderNotification(res, {
+      title: "Login Gagal",
+      header: "Gagal",
+      message: "Isi username dan password!",
+      button: "Coba Lagi",
+      redirect: "/login.html",
+    });
+  }
+
+  const q = "SELECT * FROM account WHERE Username = ?";
+  conn.query(q, [username], async (err, results) => {
+    if (err) return res.status(500).send("Database Error");
+
+    if (results.length > 0) {
+      const match = await bcrypt.compare(password, results[0].Password);
+
+      if (match) {
+        req.session.userId = results[0].ID;
+        req.session.username = results[0].Username;
+
+        fs.readFile("main.html", "utf-8", (err, content) => {
+          if (err) return res.status(500).send("Internal Server Error");
+          const html = content.replace("", results[0].Username);
+          res.send(html);
+        });
+      } else {
+        return renderNotification(res, {
+          title: "Login Gagal",
+          header: "Salah Password",
+          message: "Password yang Anda masukkan salah.",
+          button: "Coba Lagi",
+          redirect: "/login.html",
+        });
+      }
+    } else {
+      return renderNotification(res, {
+        title: "Login Gagal",
+        header: "User Tidak Ditemukan",
+        message: "Username tidak terdaftar.",
+        button: "Daftar",
+        redirect: "/register.html",
+      });
+    }
+  });
+});
+
+// ==========================================================
+// REGISTER
+// ==========================================================
+app.post("/register", async (req, res) => {
+  const { username, password, confirmPassword } = req.body;
+
+  if (!username || !password || !confirmPassword) {
+    return renderNotification(res, {
+      title: "Register Gagal",
+      header: "Form Tidak Lengkap",
+      message: "Semua field wajib diisi!",
+      button: "Coba Lagi",
+      redirect: "/register.html",
+    });
+  }
+
+  if (password !== confirmPassword) {
+    return renderNotification(res, {
+      title: "Register Gagal",
+      header: "Password Tidak Sama",
+      message: "Password dan konfirmasi password harus sama.",
+      button: "Coba Lagi",
+      redirect: "/register.html",
+    });
+  }
+
+  const hasUppercase = /[A-Z]/.test(password);
+  const hasNumber = /\d/.test(password);
+  const isLongEnough = password.length >= 6;
+
+  if (!hasUppercase || !hasNumber || !isLongEnough) {
+    return renderNotification(res, {
+      title: "Register Gagal",
+      header: "Password Lemah",
+      message: "Password minimal 6 karakter, 1 huruf besar, 1 angka.",
+      button: "Kembali",
+      redirect: "/register.html",
+    });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const q = "INSERT INTO account (Username, Password) VALUES (?, ?)";
+    conn.query(q, [username, hashedPassword], (err) => {
+      if (err)
+        return res.status(500).send("Username sudah terpakai atau error DB");
+      res.redirect("/login.html");
+    });
+  } catch (err) {
+    res.status(500).send("Error Hashing");
+  }
+});
+
+// ==========================================================
+// LOGOUT
+// ==========================================================
+app.get("/logout", (req, res) => {
+  req.session.destroy(() => {
+    res.redirect("/");
+  });
+});
+
+// ==========================================================
+// ADMIN LOGIN
+// ==========================================================
+app.get("/admin", (req, res) => {
+  fs.readFile("admin_login.html", "utf-8", (err, data) => {
+    if (err) return res.status(500).send("Internal Server Error");
+    res.send(data);
+  });
+});
+
+app.post("/admin_login", (req, res) => {
+  const { username, password } = req.body;
+  const q =
+    "SELECT * FROM admin WHERE Username_Admin = ? AND Password_Admin = ?";
+
+  conn.query(q, [username, password], (err, results) => {
+    if (err) return res.status(500).send("Database Query Error");
+
+    if (results.length > 0) {
+      req.session.isAdmin = true;
+      req.session.adminName = results[0].Username_Admin;
+
+      fs.readFile("admin_main.html", "utf-8", (err, content) => {
+        if (err) return res.status(500).send("Internal Server Error");
+
+        const html = content.replace(
+          "",
+          `${results[0].Username_Admin} (Admin)`
+        );
+        res.send(html);
+      });
+    } else {
+      return renderNotification(res, {
+        title: "Login Admin Gagal",
+        header: "Login Admin Gagal!",
+        message: "Username atau password admin salah!",
+        button: "Coba Lagi",
+        redirect: "/admin",
+      });
+    }
+  });
+});
+
+app.get("/api/campaigns", (req, res) => {
+  const search = req.query.search || "";
+  const sort = req.query.sort || "";
+  const status = req.query.status || "";
+
+  let query = "SELECT * FROM campaigns WHERE title LIKE ?";
+  const params = [`%${search}%`];
+
+  if (status && status !== "all") {
+    query += " AND status = ?";
+    params.push(status);
+  }
+
+  if (sort === "donasi") query += " ORDER BY current_amount DESC";
+  else if (sort === "target") query += " ORDER BY target_amount DESC";
+  else if (sort === "tanggal") query += " ORDER BY end_date DESC";
+  else query += " ORDER BY id DESC";
+
+  conn.query(query, params, (err, results) => {
+    if (err) return res.status(500).json({ message: "Error ambil data" });
+    res.json(results);
+  });
+});
+
+app.get("/api/admin/all-campaigns", (req, res) => {
+  const search = req.query.search || "";
+  const status = req.query.status || "";
+  const sort = req.query.sort || "";
+
+  console.log("Admin Filter Request ->", { search, status, sort });
+
+  let query = "SELECT * FROM campaigns WHERE title LIKE ?";
+  let params = [`%${search}%`];
+
+  if (status) {
+    query += " AND status = ?";
+    params.push(status);
+  }
+
+  if (sort === "donasi") {
+    query += " ORDER BY current_amount DESC";
+  } else if (sort === "target") {
+    query += " ORDER BY target_amount DESC";
+  } else if (sort === "tanggal") {
+    query += " ORDER BY end_date DESC";
+  } else {
+    query += " ORDER BY created_at DESC";
+  }
+
+  console.log("Query SQL:", query);
+
+  conn.query(query, params, (err, results) => {
+    if (err) {
+      console.error("Error DB:", err);
+      return res.status(500).json({ message: "Error Database" });
+    }
+    res.json(results);
+  });
+});
+
+app.get("/api/campaigns/:id", (req, res) => {
+  const { id } = req.params;
+
+  const query = "SELECT * FROM campaigns WHERE id = ?";
+
+  conn.query(query, [id], (err, results) => {
+    if (err) {
+      console.error("Error fetching single campaign:", err);
+      return res.status(500).json({
+        message: "Gagal mengambil data kampanye.",
+      });
+    }
+
+    if (results.length > 0) {
+      res.json(results[0]);
+    } else {
+      res.status(404).json({
+        message: "Kampanye tidak ditemukan.",
+      });
+    }
+  });
+});
+
+app.put("/api/campaigns/:id", (req, res) => {
+  const { id } = req.params;
+
+  const { title, target_amount, status, end_date, image_url } = req.body;
+  if (!title || !target_amount || !status || !end_date) {
+    return res.status(400).json({
+      message: "Semua field wajib diisi.",
+    });
+  }
+
+  const query =
+    "UPDATE campaigns SET title = ?, target_amount = ?, status = ?, end_date = ?, image_url = ? WHERE id = ?";
+
+  const params = [title, target_amount, status, end_date, image_url, id];
+
+  conn.query(query, params, (err, results) => {
+    if (err) {
+      console.error("Error updating campaign:", err);
+      return res.status(500).json({
+        message: "Gagal mengupdate kampanye.",
+      });
+    }
+    if (results.affectedRows === 0) {
+      return res.status(404).json({
+        message: "Kampanye tidak ditemukan.",
+      });
+    }
+    res.json({
+      message: "Kampanye berhasil diupdate!",
+    });
+  });
+});
+
+app.delete("/api/campaigns/:id", (req, res) => {
+  const { id } = req.params;
+  const query = "DELETE FROM campaigns WHERE id = ?";
+
+  conn.query(query, [id], (err, results) => {
+    if (err) {
+      console.error("Error deleting campaign:", err);
+      return res.status(500).json({
+        message: "Gagal menghapus kampanye.",
+      });
+    }
+    if (results.affectedRows === 0) {
+      return res.status(404).json({
+        message: "Kampanye tidak ditemukan.",
+      });
+    }
+    res.json({
+      message: "Kampanye berhasil dihapus!",
+    });
+  });
+});
+
+app.delete("/api/admin/donasi/:id", (req, res) => {
+  const { id } = req.params;
+
+  conn.getConnection((err, connection) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "DB Error" });
+    }
+
+    connection.beginTransaction((err) => {
+      if (err) {
+        connection.release();
+        return res.status(500).json({ message: "Gagal memulai transaksi" });
+      }
+
+      const q1 = "SELECT nominal, campaign_id FROM donasi WHERE id = ?";
+      connection.query(q1, [id], (err, results) => {
+        if (err || results.length === 0) {
+          return connection.rollback(() => {
+            connection.release();
+            res.status(404).json({ message: "Donasi tidak ditemukan" });
+          });
+        }
+
+        const { nominal, campaign_id } = results[0];
+
+        const q2 =
+          "UPDATE campaigns SET current_amount = current_amount - ? WHERE id = ?";
+        connection.query(q2, [nominal, campaign_id], (err) => {
+          if (err) {
+            return connection.rollback(() => {
+              connection.release();
+              res.status(500).json({ message: "Gagal update campaign" });
+            });
+          }
+
+          const q3 = "DELETE FROM donasi WHERE id = ?";
+          connection.query(q3, [id], (err) => {
+            if (err) {
+              return connection.rollback(() => {
+                connection.release();
+                res.status(500).json({ message: "Gagal hapus donasi" });
+              });
+            }
+
+            connection.commit((err) => {
+              if (err) {
+                return connection.rollback(() => {
+                  connection.release();
+                  res.status(500).json({ message: "Commit gagal" });
+                });
+              }
+
+              connection.release();
+              res.json({
+                message:
+                  "Donasi berhasil dihapus dan total campaign diperbarui",
+              });
+            });
+          });
+        });
+      });
+    });
+  });
+});
+
+
+app.get("/api/user", (req, res) => {
+  if (req.session && req.session.username) {
+    res.status(200).json({
+      username: req.session.username,
+    });
+  } else {
+    res.status(401).json({
+      message: "User not authenticated",
+    });
+  }
+});
+
+app.post("/api/donate", (req, res) => {
+  if (!req.session.userId) {
+    return res.status(401).json({
+      message: "Anda harus login untuk berdonasi.",
+    });
+  }
+
+  const { campaignId, nama, nominal, pesan } = req.body;
+  const userId = req.session.userId;
+
+  conn.getConnection((err, connection) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "DB Error" });
+    }
+
+    connection.beginTransaction((err) => {
+      if (err) {
+        connection.release();
+        return res.status(500).json({ message: "Gagal memulai transaksi" });
+      }
+
+      const q1 = `
+        INSERT INTO donasi 
+        (user_id, campaign_id, nama_donatur, nominal, pesan, tanggal)
+        VALUES (?, ?, ?, ?, ?, NOW())
+      `;
+
+      connection.query(
+        q1,
+        [userId, campaignId, nama, nominal, pesan],
+        (err) => {
+          if (err) {
+            return connection.rollback(() => {
+              connection.release();
+              res.status(500).json({ message: "Gagal simpan donasi" });
+            });
+          }
+
+          const q2 =
+            "UPDATE campaigns SET current_amount = current_amount + ? WHERE id = ?";
+          connection.query(q2, [nominal, campaignId], (err) => {
+            if (err) {
+              return connection.rollback(() => {
+                connection.release();
+                res.status(500).json({ message: "Gagal update campaign" });
+              });
+            }
+
+            connection.commit((err) => {
+              if (err) {
+                return connection.rollback(() => {
+                  connection.release();
+                  res.status(500).json({ message: "Commit gagal" });
+                });
+              }
+
+              connection.release();
+              res.json({
+                message: "Terima kasih, donasi berhasil!",
+              });
+            });
+          });
+        }
+      );
+    });
+  });
+});
+
+
+app.get("/api/admin/donasi", (req, res) => {
+  const search = req.query.search ? `%${req.query.search}%` : "%";
+  const q = `
+    SELECT d.id, d.nama_donatur, d.nominal, d.pesan, d.tanggal, a.Username AS pemilik_akun
+    FROM donasi d
+    LEFT JOIN account a ON d.user_id = a.ID
+    WHERE d.nama_donatur LIKE ?
+    ORDER BY d.tanggal DESC
+  `;
+  conn.query(q, [search], (err, results) => {
+    if (err)
+      return res.status(500).json({
+        error: err.message,
+      });
+    res.json(results);
+  });
+});
+
+app.get("/api/stats/total-donasi", (req, res) => {
+  const q = "SELECT SUM(nominal) AS totalDonasi FROM donasi";
+  conn.query(q, (err, results) => {
+    if (err)
+      return res.status(500).json({
+        error: err.message,
+      });
+    const total = results[0].totalDonasi || 0;
+    res.json({
+      totalDonasi: total,
+    });
+  });
+});
+
+app.get("/api/stats/jumlah-donatur", (req, res) => {
+  const q = "SELECT COUNT(DISTINCT user_id) AS jumlahDonatur FROM donasi";
+  conn.query(q, (err, results) => {
+    if (err)
+      return res.status(500).json({
+        error: err.message,
+      });
+    res.json({
+      jumlahDonatur: results[0].jumlahDonatur,
+    });
+  });
+});
+
+app.get("/api/stats/total-kampanye", (req, res) => {
+  const q = "SELECT COUNT(*) AS totalKampanye FROM campaigns";
+  conn.query(q, (err, results) => {
+    if (err)
+      return res.status(500).json({
+        error: err.message,
+      });
+    res.json({
+      totalKampanye: results[0].totalKampanye,
+    });
+  });
+});
+
+app.post("/api/campaigns", (req, res) => {
+  const { title, description, target_amount, end_date, image_url } = req.body;
+
+  if (!title || !target_amount || !end_date) {
+    return res.status(400).json({ message: "Data tidak lengkap!" });
+  }
+
+  const query =
+    "INSERT INTO campaigns (title, description, target_amount, end_date, image_url, status, current_amount) VALUES (?, ?, ?, ?, ?, 'pending', 0)";
+  const params = [title, description, target_amount, end_date, image_url];
+
+  conn.query(query, params, (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Error Database" });
+    }
+    res.status(201).json({
+      message: "Kampanye berhasil dibuat! Menunggu verifikasi admin.",
+      newCampaignId: results.insertId,
+    });
+  });
+});
+
+app.post("/api/admin/donasi/bulk", (req, res) => {
+  const entries = req.body;
+
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return res.status(400).json({
+      message: "Data bulk kosong atau tidak valid.",
+    });
+  }
+
+  const SYSTEM_USER_ACCOUNT_ID = 6;
+
+  for (const d of entries) {
+    if (!d.nama || !d.nominal || !d.campaignId) {
+      return res.status(400).json({
+        message: "Setiap baris wajib memiliki nama, nominal, dan campaignId.",
+      });
+    }
+  }
+
+  const normalized = entries.map((e) => ({
+    nama: String(e.nama).trim(),
+    nominal: Number(e.nominal),
+    pesan: e.pesan ? String(e.pesan).trim() : "",
+    campaignId: Number(e.campaignId),
+  }));
+
+  const campaignIds = Array.from(new Set(normalized.map((x) => x.campaignId)));
+  const placeholders = campaignIds.map(() => "?").join(",");
+  conn.query(
+    `SELECT id FROM campaigns WHERE id IN (${placeholders})`,
+    campaignIds,
+    (err, rows) => {
+      if (err) {
+        console.error("Error checking campaigns:", err);
+        return res.status(500).json({
+          message: "Gagal validasi campaign.",
+          error: err,
+        });
+      }
+
+      const foundIds = rows.map((r) => r.id);
+      const missing = campaignIds.filter((id) => !foundIds.includes(id));
+      if (missing.length > 0) {
+        return res.status(400).json({
+          message: `Campaign ID tidak ditemukan: ${missing.join(", ")}`,
+        });
+      }
+
+      const now = new Date();
+      const values = normalized.map((d) => [
+        SYSTEM_USER_ACCOUNT_ID,
+        d.nama,
+        d.nominal,
+        d.pesan,
+        now,
+        d.campaignId,
+      ]);
+
+      const sql = `
+        INSERT INTO donasi (user_id, nama_donatur, nominal, pesan, tanggal, campaign_id)
+        VALUES ?
+      `;
+
+      conn.query(sql, [values], (insertErr, result) => {
+        if (insertErr) {
+          console.error("Error Bulk Insert:", insertErr);
+          return res.status(500).json({
+            message: "Gagal menyimpan donasi bulk.",
+            error: insertErr,
+          });
+        }
+
+        return res.status(201).json({
+          message: "Donasi bulk berhasil disimpan!",
+          totalInserted: result.affectedRows,
+        });
+      });
+    }
+  );
+});
+
+app.get("/api/user/history", (req, res) => {
+  if (!req.session.userId)
+    return res.status(401).json({ message: "Login dulu" });
+
+  const q = `
+    SELECT d.*, c.title as campaign_title 
+    FROM donasi d 
+    JOIN campaigns c ON d.campaign_id = c.id 
+    WHERE d.user_id = ? 
+    ORDER BY d.tanggal DESC`;
+
+  conn.query(q, [req.session.userId], (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+
+app.get("/api/admin/campaigns/pending", (req, res) => {
+  const q =
+    "SELECT * FROM campaigns WHERE status = 'pending' ORDER BY created_at DESC";
+  conn.query(q, (err, results) => {
+    if (err) return res.status(500).json({ error: err.message });
+    res.json(results);
+  });
+});
+
+app.post("/api/admin/campaigns/approve/:id", (req, res) => {
+  const { id } = req.params;
+
+  const q = "UPDATE campaigns SET status = 'active' WHERE id = ?";
+
+  conn.query(q, [id], (err, results) => {
+    if (err) {
+      console.error(err);
+      return res.status(500).json({ message: "Gagal update status." });
+    }
+    if (results.affectedRows === 0) {
+      return res.status(404).json({ message: "Kampanye tidak ditemukan." });
+    }
+    res.json({ message: "Kampanye berhasil disetujui!" });
+  });
+});
+
+app.get("/api/campaigns-public", (req, res) => {
+  const search = req.query.search || "";
+
+  let query =
+    "SELECT * FROM campaigns WHERE status = 'active' AND title LIKE ?";
+  const params = [`%${search}%`];
+
+  conn.query(query, params, (err, results) => {
+    if (err) return res.status(500).json({ message: "Error" });
+    res.json(results);
+  });
+});
+
+app.listen(3010, () => {
+  console.log("Server running at http://localhost:3010");
+});
